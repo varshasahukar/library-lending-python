@@ -29,7 +29,7 @@ jobs:
             pip install pytest==8.2.2 pytest-cov==5.0.0
       - run:
           name: Run Unit Tests with Coverage
-          command: pytest tests/test_fines.py --cov=app --cov-report=term-missing --cov-fail-under=70
+          command: pytest tests/test_fines.py tests/test_main.py --cov=app --cov-report=term-missing --cov-fail-under=70
 
   integration-tests:
     docker:
