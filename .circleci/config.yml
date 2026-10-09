@@ -1,0 +1,135 @@
+version: 2.1
+
+executors:
+  python-executor:
+    docker:
+      - image: cimg/python:3.12
+    working_directory: ~/repo
+
+jobs:
+  lint:
+    executor: python-executor
+    steps:
+      - checkout
+      - run:
+          name: Install Ruff
+          command: pip install ruff==0.4.8
+      - run:
+          name: Run Ruff Linter
+          command: ruff check .
+
+  unit-tests:
+    executor: python-executor
+    steps:
+      - checkout
+      - run:
+          name: Install Dependencies and pytest
+          command: |
+            pip install -r requirements.txt
+            pip install pytest==8.2.2 pytest-cov==5.0.0
+      - run:
+          name: Run Unit Tests with Coverage
+          command: pytest tests/test_fines.py --cov=app --cov-report=term-missing --cov-fail-under=70
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12
+      - image: cimg/postgres:16.2
+        environment:
+          POSTGRES_USER: library
+          POSTGRES_PASSWORD: library
+          POSTGRES_DB: library_lending
+      - image: cimg/redis:7.2
+    environment:
+      DATABASE_URL: postgresql://library:library@localhost:5432/library_lending
+      REDIS_URL: redis://localhost:6379/0
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: Install System Tools & Dependencies
+          command: |
+            sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
+            pip install -r requirements.txt
+            pip install pytest==8.2.2 pytest-cov==5.0.0 httpx==0.27.0
+      - run:
+          name: Wait for Postgres & Redis
+          command: |
+            echo "Waiting for Postgres..."
+            until pg_isready -h localhost -U library -d library_lending; do
+              sleep 1
+            done
+            echo "Waiting for Redis..."
+            until redis-cli -h localhost ping | grep PONG; do
+              sleep 1
+            done
+            echo "Services ready."
+      - run:
+          name: Apply Database Migrations
+          command: |
+            for f in migrations/*.sql; do
+              echo "Applying $f..."
+              PGPASSWORD=library psql -h localhost -U library -d library_lending -f "$f"
+            done
+      - run:
+          name: Run Integration Tests
+          command: pytest tests/test_integration.py --cov=app --cov-report=term-missing
+
+  secret-scan:
+    docker:
+      - image: cimg/base:current
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: Install Gitleaks
+          command: |
+            GITLEAKS_VERSION="8.18.2"
+            curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+            sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+      - run:
+          name: Run Gitleaks Secret Scan
+          command: gitleaks detect --source . --verbose --no-git
+
+  image-build:
+    docker:
+      - image: cimg/base:current
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Build Docker Image
+          command: |
+            IMAGE_TAG="${DOCKERHUB_USERNAME:-library}/library-lending:1.0"
+            docker build -t "$IMAGE_TAG" .
+            echo "Built $IMAGE_TAG"
+      - run:
+          name: Push to Docker Hub
+          command: |
+            if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_PASSWORD" ]; then
+              echo "$DOCKERHUB_PASSWORD" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+              docker push "$DOCKERHUB_USERNAME/library-lending:1.0"
+              echo "Successfully pushed $DOCKERHUB_USERNAME/library-lending:1.0 to Docker Hub"
+            else
+              echo "DOCKERHUB_USERNAME or DOCKERHUB_PASSWORD not set; skipping push."
+            fi
+
+workflows:
+  pipeline:
+    jobs:
+      - lint
+      - unit-tests:
+          requires:
+            - lint
+      - integration-tests:
+          requires:
+            - unit-tests
+      - secret-scan:
+          requires:
+            - integration-tests
+      - image-build:
+          requires:
+            - secret-scan
