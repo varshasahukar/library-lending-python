@@ -100,6 +100,60 @@ The Redis lock in `app/main.py` is not the answer - it is a convenience. Redis l
 
 Write your answer in your README. It is worth more marks than the feature.
 
+### Analysis & Solution: Concurrency Guarantees for the Last-Copy Race
+
+#### 1. Why the Redis Lock is Only a Convenience, Not the Guarantee
+The Redis lock (`lock:borrow:{book_id}` via `SET NX PX 4000`) in `app/main.py` is an optimistic optimization, not a correctness guarantee:
+- **Lock Expiration During Process Stalls:** If a worker process experiences an operating system scheduling stall, Python GIL contention, garbage collection delay, or database latency longer than 4000ms, Redis will automatically expire the key.
+- **Lost Mutual Exclusion:** Once expired, a second worker process racing for the same book will successfully acquire the lock. Both workers now operate under the assumption that they have exclusive access to the copy.
+- **Distributed Failure Modes:** Network splits, clock drift, or Redis restarts can also compromise client-side lock state.
+
+Thus, the Redis lock serves only as a politeness mechanism to reduce unnecessary load on PostgreSQL by rejecting concurrent requests before they hit the database. It cannot provide ACID serializability.
+
+#### 2. The Two Real Guarantees in this Codebase
+The actual safety guarantees are enforced at the database level by PostgreSQL:
+
+1. **The Atomic Conditional UPDATE with Row-Level Locking:**
+   ```sql
+   UPDATE copies SET status='on_loan' WHERE id = (
+     SELECT id FROM copies WHERE book_id=%s AND status='available'
+     ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED
+   ) RETURNING id, barcode
+   ```
+   *(Found in `app/main.py`, lines 132–136)*
+   This query runs inside a single database transaction. The subquery selects an available copy while locking the row exclusively (`FOR UPDATE SKIP LOCKED`). When two workers execute this concurrently:
+   - Worker 1 locks the row and updates its status to `'on_loan'`.
+   - Worker 2 skips the locked row (`SKIP LOCKED`). Because no other copy has `status='available'`, the subquery returns no rows, and the outer UPDATE updates 0 rows.
+   - `cur.fetchone()` returns `None`, and the code raises `HTTPException(409, "no_copies_available")`.
+
+2. **The Partial Unique Index `loans_one_active_per_copy`:**
+   ```sql
+   CREATE UNIQUE INDEX IF NOT EXISTS loans_one_active_per_copy
+       ON loans (copy_id) WHERE returned_on IS NULL;
+   ```
+   *(Found in `migrations/001_schema.sql`, lines 35–36)*
+   This index enforces invariant uniqueness at the storage engine level. In PostgreSQL's B-tree index, there can only ever be at most one row for a given `copy_id` where `returned_on IS NULL`. Even if the conditional UPDATE did not exist and two connections simultaneously issued `INSERT INTO loans` for the same copy, PostgreSQL would reject the second transaction with a unique constraint violation (`23505`).
+
+#### 3. Why Either One Alone Would Still Be Correct
+- **Conditional UPDATE alone (without the partial unique index):**
+  PostgreSQL ensures row-level mutual exclusion during updates. Only one transaction can successfully match `status='available'` and mutate the status to `'on_loan'`. The losing transaction updates 0 rows, receives `None`, and aborts before issuing an `INSERT INTO loans`. Double-lending is impossible.
+- **Partial Unique Index alone (without the conditional UPDATE):**
+  If two transactions concurrently attempt to insert an active loan for the same copy, PostgreSQL's index uniqueness constraint guarantees that one transaction commits and the other is rejected with a unique constraint violation. Two active loans for the same physical copy can never coexist in the database.
+
+#### 4. Why the UPDATE Must NOT Be Split into a SELECT Followed by an UPDATE
+Splitting the operation into a `SELECT` followed by an `UPDATE` on a separate query/connection introduces a classic **Time-of-Check to Time-of-Use (TOCTOU)** race condition:
+1. Connection 1 queries `SELECT id FROM copies WHERE book_id=3 AND status='available'` and sees copy 6 available.
+2. Connection 2 queries `SELECT id FROM copies WHERE book_id=3 AND status='available'` concurrently. Under standard `READ COMMITTED` transaction isolation, Connection 2 also sees copy 6 available.
+3. Connection 1 executes `UPDATE copies SET status='on_loan' WHERE id=6` and succeeds.
+4. Connection 2 executes `UPDATE copies SET status='on_loan' WHERE id=6` on its connection. If unconditional, it overwrites the state. Even if conditional, Connection 2 believed the copy was available and proceeded to insert a second active loan, causing a double-borrow or duplicate loan records.
+
+By keeping the selection and mutation combined into a single atomic statement inside one connection and one transaction, the row lock is acquired and the status updated in one indivisible operation.
+
+#### 5. What the Client Should See When It Loses: A 409, Not a 500
+- **500 Internal Server Error:** Indicates an unhandled exception, syntax failure, server crash, or infrastructure breakdown (e.g., database unavailable).
+- **409 Conflict:** RFC 9110 specifies that 409 indicates the request could not be completed due to a conflict with the current state of the resource.
+- When two students race for the last copy of a book, losing the race is a normal, expected business outcome. The application did not fail; rather, the requested resource is in conflict with another transaction that claimed it first. The losing client should see `409 Conflict` (with payload `{"detail": "no_copies_available"}`), allowing client applications to gracefully notify the user that the book was just taken by someone else.
+
 ---
 
 ## Getting unstuck
