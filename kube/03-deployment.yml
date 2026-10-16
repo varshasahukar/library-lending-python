@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: library-lending
+  labels:
+    app: library-lending
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: library-lending
+  template:
+    metadata:
+      labels:
+        app: library-lending
+    spec:
+      imagePullSecrets:
+        - name: dockerhub
+      containers:
+        - name: library-lending
+          image: varsha198/library-lending-python:qa
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://library:library@db:5432/library_lending"
+            - name: REDIS_URL
+              value: "redis://cache:6379/0"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10

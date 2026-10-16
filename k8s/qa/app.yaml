@@ -29,7 +29,7 @@ spec:
         - name: dockerhub
       containers:
         - name: library-lending
-          image: varshasahukar/library-lending-python:qa
+          image: varsha198/library-lending-python:qa
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
