@@ -353,3 +353,40 @@ class TestPayFines:
         assert response.json()["member_id"] == 1
         assert response.json()["cleared"] == 2
         assert response.json()["paid"] == 4.0
+
+
+class TestCancelLoan:
+    @patch("app.main.db.one")
+    def test_cancel_loan_not_found(self, mock_one):
+        mock_one.return_value = None
+        response = client.delete("/loans/999")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "no such loan"
+
+    @patch("app.main.db.one")
+    def test_cancel_loan_already_closed(self, mock_one):
+        mock_one.return_value = {
+            "id": 1,
+            "copy_id": 2,
+            "returned_on": "2026-10-01",
+            "book_id": 3,
+        }
+        response = client.delete("/loans/1")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "that loan is closed"
+
+    @patch("app.main.cache.drop")
+    @patch("app.main.db.connect")
+    @patch("app.main.db.one")
+    def test_cancel_loan_success(self, mock_one, mock_connect, mock_drop):
+        mock_one.return_value = {
+            "id": 10,
+            "copy_id": 4,
+            "returned_on": None,
+            "book_id": 2,
+        }
+        response = client.delete("/loans/10")
+        assert response.status_code == 200
+        assert response.json() == {"loan_id": 10, "deleted": True}
+        mock_drop.assert_called_once_with("avail:2")
+

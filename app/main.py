@@ -210,3 +210,22 @@ def pay(member_id: int):
         raise HTTPException(409, "nothing to pay")
     return {"member_id": member_id, "cleared": len(rows),
             "paid": round(sum(float(r["amount"]) for r in rows), 2)}
+
+
+@app.delete("/loans/{loan_id}")
+def cancel_loan(loan_id: int):
+    loan = db.one("SELECT l.id, l.copy_id, l.returned_on, c.book_id"
+                  " FROM loans l JOIN copies c ON c.id=l.copy_id"
+                  " WHERE l.id=%s", (loan_id,))
+    if not loan:
+        raise HTTPException(404, "no such loan")
+    if loan["returned_on"]:
+        raise HTTPException(409, "that loan is closed")
+
+    with db.connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM loans WHERE id=%s", (loan_id,))
+        cur.execute("UPDATE copies SET status='available' WHERE id=%s", (loan["copy_id"],))
+
+    cache.drop(f"avail:{loan['book_id']}")
+    return {"loan_id": loan_id, "deleted": True}
+

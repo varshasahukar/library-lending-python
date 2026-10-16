@@ -236,3 +236,28 @@ class TestFinesPayment:
         res_again = client.post("/members/4/fines/pay")
         assert res_again.status_code == 409
         assert res_again.json()["detail"] == "nothing to pay"
+
+
+class TestCancelLoanIntegration:
+    def test_cancel_loan_flow(self):
+        # Borrow book 4 for Asha (member 1)
+        borrow_res = client.post("/borrow", json={"member_id": 1, "book_id": 4})
+        assert borrow_res.status_code == 201
+        loan_id = borrow_res.json()["loan_id"]
+        copy_barcode = borrow_res.json()["barcode"]
+
+        # Cancel the loan
+        cancel_res = client.delete(f"/loans/{loan_id}")
+        assert cancel_res.status_code == 200
+        assert cancel_res.json() == {"loan_id": loan_id, "deleted": True}
+
+        # Verify loan no longer exists in DB
+        assert db.one("SELECT id FROM loans WHERE id=%s", (loan_id,)) is None
+
+        # Verify copy status is available again
+        copy_row = db.one("SELECT status FROM copies WHERE barcode=%s", (copy_barcode,))
+        assert copy_row["status"] == "available"
+
+        # Cancelling non-existent loan returns 404
+        assert client.delete(f"/loans/{loan_id}").status_code == 404
+
