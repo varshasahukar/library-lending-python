@@ -210,3 +210,5 @@ def pay(member_id: int):
         raise HTTPException(409, "nothing to pay")
     return {"member_id": member_id, "cleared": len(rows),
             "paid": round(sum(float(r["amount"]) for r in rows), 2)}
+   
+print("hello")

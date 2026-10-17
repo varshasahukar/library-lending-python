@@ -108,13 +108,20 @@ jobs:
       - run:
           name: Build and Push Docker Image with Moving and Immutable Tags
           command: |
-            DH_USER="${DOCKERHUB_USER:-$DOCKERHUB_USERNAME}"
-            DH_TOKEN="${DOCKERHUB_TOKEN:-$DOCKERHUB_PASSWORD}"
+            set -eo pipefail
+
+            DH_USER="${DOCKERHUB_USER:-${DOCKERHUB_USERNAME:-}}"
+            DH_TOKEN="${DOCKERHUB_TOKEN:-${DOCKERHUB_PASSWORD:-}}"
             REPO_NAME="${DOCKERHUB_REPO:-library-lending-python}"
 
             if [ -z "$DH_USER" ]; then
-              echo "WARNING: DOCKERHUB_USER not set. Defaulting to 'library' for build verification."
-              DH_USER="library"
+              echo "ERROR: Docker Hub username is not configured."
+              exit 1
+            fi
+
+            if [ -z "$DH_TOKEN" ]; then
+              echo "ERROR: Docker Hub token is not configured."
+              exit 1
             fi
 
             SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
@@ -122,17 +129,18 @@ jobs:
             IMMUTABLE_IMAGE="${DH_USER}/${REPO_NAME}:<< parameters.immutable_prefix >>-${SHORT_SHA}"
 
             echo "Building image: $MOVING_IMAGE and $IMMUTABLE_IMAGE"
-            docker build -t "$MOVING_IMAGE" -t "$IMMUTABLE_IMAGE" .
 
-            if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ] && [ "$DH_USER" != "library" ]; then
-              echo "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin
-              docker push "$MOVING_IMAGE"
-              docker push "$IMMUTABLE_IMAGE"
-              echo "Successfully pushed both $MOVING_IMAGE and $IMMUTABLE_IMAGE"
-            else
-              echo "Docker Hub credentials not configured or using default user; skipping push."
-              echo "Configure DOCKERHUB_USER and DOCKERHUB_TOKEN in CircleCI Project Settings to enable push."
-            fi
+            docker build \
+              -t "$MOVING_IMAGE" \
+              -t "$IMMUTABLE_IMAGE" .
+
+            echo "$DH_TOKEN" | docker login \
+              -u "$DH_USER" --password-stdin
+
+            docker push "$MOVING_IMAGE"
+            docker push "$IMMUTABLE_IMAGE"
+
+            echo "Successfully pushed both images."
 
 workflows:
   main-qa-pipeline:
